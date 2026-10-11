@@ -2,9 +2,13 @@
 
 ⭐ graph.sagasu() の結果を、Graphviz の DOT という書き方の文字列にする係。
    画面では st.graphviz_chart に渡すだけで絵になる（追加のインストールは要らない）。
-   左から右へ  ドラフト → 似た企画 → 法令・システム → 担当者  の 4 段に並ぶ。
+   左から右へ  ドラフト → 似た企画 → システム → 担当者 → 電話番号  の 5 段に並ぶ。
 ⭐⭐ 濃い色は「ドラフトに名前が出てこなかった点」。線をたどったから見つかった物がどれかを見せる。
    色の決め方は表と同じ（graph.matomeru の kaite_aru）なので、表と絵で食い違わない。
+   電話番号は担当者の付属情報なので薄い色にして、視線が担当者で止まるようにする。
+⭐ 電話番号は、graph.py がシステムの行に足す denwa（{担当者名: 電話番号} の辞書）から読む。
+   denwa が無い（graph.py がまだ足していない）か、その担当者の番号が空なら、電話番号の点は描かない。
+⚠️ 法令は描かない（点の種類から外した）。kekka に hourei が残っていても読まない。
 """
 
 DRAFT = "ドラフト"
@@ -16,7 +20,7 @@ IRO = {
     "atarashii": ("#C2410C", "white"),  # ドラフトに書かれていなかった（たどって見つかった）
     "kizon": ("#EEEEEE", "#555555"),    # ドラフトにすでに書かれていた
 }
-KATACHI = {"法令": "box", "システム": "cylinder", "担当者": "ellipse"}
+KATACHI = {"システム": "cylinder", "担当者": "ellipse", "電話番号": "note"}  # note は右上の折れた紙の形
 KAIGYOU = chr(92) + "n"  # DOT の中の改行の印（\ と n の 2 文字）
 
 
@@ -49,11 +53,12 @@ def dot(kekka: dict) -> str:
         lines.append(_ten(k["title"], "kikaku", "box"))
         lines.append(f'{_q(DRAFT)} -> {_q(k["title"])} [style=dashed, label="似ている {k["score"]:.2f}"];')
 
-    # 3 段目（法令・システム）と 4 段目（担当者）。表の 1 行が 1 つの点になる。
-    kaita = set()
-    for g in kekka["system"] + kekka["hourei"]:
+    # 3 段目（システム）・4 段目（担当者）・5 段目（電話番号）。表の 1 行が 1 つのシステムの点になる。
+    kaita = set()  # 書いた担当者と電話番号の名前。同じ人が 2 つのシステムを担当していても、点は 1 つ。
+    for g in kekka["system"]:
         iro = "kizon" if g["kaite_aru"] else "atarashii"
-        lines.append(_ten(g["name"], iro, KATACHI[g["shurui"]]))
+        lines.append(_ten(g["name"], iro, KATACHI["システム"]))
+        denwa = g.get("denwa") or {}  # graph.py が足す {担当者名: 電話番号}。まだ無ければ空
         for tantou in filter(None, g["tantou"].split("・")):
             if tantou not in kaita:
                 kaita.add(tantou)
@@ -63,9 +68,21 @@ def dot(kekka: dict) -> str:
             #    システム → 担当者 の順に書き、dir=back で矢じりだけを逆（システム側）に付ける。
             lines.append(f'{_q(g["name"])} -> {_q(tantou)} [dir=back, label="担当する"];')
 
-    # 2 段目 → 3 段目の線。
+            # 5 段目: 電話番号。番号が無い担当者には描かない（空の点を増やさない）。
+            bangou = denwa.get(tantou, "")
+            if not bangou:
+                continue
+            if bangou not in kaita:
+                kaita.add(bangou)
+                # 同じ代表連絡先を持つ担当者が 2 人いれば、点は 1 つに合流する（＝その部署の番号）。
+                lines.append(_ten(bangou, "kizon", KATACHI["電話番号"]))
+            # 線の向きは本当に 担当者 → 電話番号 なので、dir=back は要らない。
+            lines.append(f'{_q(tantou)} -> {_q(bangou)} [label="電話"];')
+
+    # 2 段目 → 3 段目の線。⚠️ システムへの線だけ。graph.py が法令の道を返している間も、法令の点が勝手に生えないように。
     for m in kekka["michi"]:
-        lines.append(f'{_q(m["kikaku"])} -> {_q(m["saki"])} [label="{m["kankei"]}"];')
+        if m["shurui"] == "システム":
+            lines.append(f'{_q(m["kikaku"])} -> {_q(m["saki"])} [label="{m["kankei"]}"];')
 
     lines.append("}")
     return "\n".join(lines)
