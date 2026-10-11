@@ -3,3 +3,5 @@ pandas
 scikit-learn
 anthropic
 python-dotenv
+python-docx
+openpyxl
