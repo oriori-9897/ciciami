@@ -1,12 +1,14 @@
 """企画書・台帳の表・点と線を SQLite にしまう。
 
 ⭐ 図の「しまう」の 3 番目の係と、まん中の「DB」。表は 4 つ。
-   kikaku  … 過去の企画書の本文（似た企画を探すのに使う。原文もここから出す）
+   kikaku  … 過去の企画書の本文（似た企画を探すのに使う。原文もここから出す）と、商品名など（toushin / yokin / hoken / tsuki / target）
    daichou … システム台帳の表（CSV をそのまま。1 行が 1 システム）
    ten     … 点。登場する物の名前（企画・法令・システム・担当者）
    sen     … 線。点どうしの関係（moto --kankei--> saki）
 ⭐⭐ どの表にも UNIQUE を付け、INSERT OR IGNORE で書く。
    「資料を読み込む」を 2 回押しても、同じ行が 2 つにならない（＝重ならないように書く）。
+⭐⭐⭐ ただし台帳まわりだけは、読み込むたびに作り直す（save_daichou）。
+   台帳は「いまの担当者」を表す正しい情報なので、担当者が変わったときに古い人が残らないようにするため。
 """
 
 import csv
@@ -19,7 +21,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS kikaku (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL UNIQUE,
-    body  TEXT NOT NULL
+    body  TEXT NOT NULL,
+    toushin TEXT, yokin TEXT, hoken TEXT, tsuki INTEGER, target TEXT   -- 商品名など（jouken.py と同じキー）
 );
 CREATE TABLE IF NOT EXISTS daichou (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,7 +30,8 @@ CREATE TABLE IF NOT EXISTS daichou (
     betsumei TEXT,                   -- 別名（例: CRM）
     tantou   TEXT,                   -- 担当者
     busho    TEXT,                   -- 部署
-    kimari   TEXT                    -- 稼働の決まり
+    kimari   TEXT,                   -- 稼働の決まり
+    renraku  TEXT                    -- 代表連絡先（台帳の「代表連絡先」列）
 );
 CREATE TABLE IF NOT EXISTS ten (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,12 +50,26 @@ CREATE TABLE IF NOT EXISTS sen (
 
 TABLES = ("kikaku", "daichou", "ten", "sen")
 
+# 企画書の表に足した列（キーと文字は jouken.py とそろえる）。古い DB に列を足すときにも使う。
+KIKAKU_EXTRA_COLUMNS = (("toushin", "TEXT"), ("yokin", "TEXT"), ("hoken", "TEXT"), ("tsuki", "INTEGER"), ("target", "TEXT"))
+
 
 def connect() -> sqlite3.Connection:
     """接続を開いて、表が無ければ作る。"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row  # 行を row["title"] のように列名で読めるようにする
     conn.executescript(SCHEMA)
+    # 古い DB（renraku 列が無い daichou）を使っていたら、列だけ足す。DB を作り直さなくてよい。
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(daichou)")]
+    if "renraku" not in columns:
+        conn.execute("ALTER TABLE daichou ADD COLUMN renraku TEXT")
+        conn.commit()
+    # 同じく、古い DB の kikaku に、商品名などの列が無ければ足す。
+    kikaku_columns = [r["name"] for r in conn.execute("PRAGMA table_info(kikaku)")]
+    for name, kind in KIKAKU_EXTRA_COLUMNS:
+        if name not in kikaku_columns:
+            conn.execute(f"ALTER TABLE kikaku ADD COLUMN {name} {kind}")
+    conn.commit()
     return conn
 
 
@@ -59,8 +77,9 @@ def connect() -> sqlite3.Connection:
 def save_kikaku(kikaku: list[dict]) -> None:
     with connect() as conn:  # with を抜けるときに commit される
         conn.executemany(
-            "INSERT OR IGNORE INTO kikaku (title, body) VALUES (?, ?)",
-            [(k["title"], k["body"]) for k in kikaku],
+            "INSERT OR IGNORE INTO kikaku (title, body, toushin, yokin, hoken, tsuki, target) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            # 商品名などのキーが無い企画書（loader.py から来たばかりのもの）は、空（None）で書く
+            [(k["title"], k["body"], k.get("toushin"), k.get("yokin"), k.get("hoken"), k.get("tsuki"), k.get("target")) for k in kikaku],
         )
 
 
@@ -69,29 +88,43 @@ def save_daichou(rows: list[dict]) -> None:
 
     ⭐ CSV の日本語の列名を、表の列に当てはめる。
     ⭐⭐ 担当者とシステムの線は、表の 1 行がそのまま 1 本の線になる。LLM は通さない。
+    ⭐⭐⭐ 台帳が「正」なので、書く前に台帳から作った分（台帳の表・担当者の点・「担当する」の線）を消して作り直す。
+       担当者が変わっても、古い担当者が残らない。
+       消さないもの: 企画書の本文、法令・システムの点、企画書から作った線（関わる / 使う）。
+       ⚠️ 台帳が空のときは何もしない。読み込みに失敗して、担当者が全部消えるのを防ぐため。
     """
-    with connect() as conn:
-        conn.executemany(
-            "INSERT OR IGNORE INTO daichou (system, betsumei, tantou, busho, kimari) VALUES (?, ?, ?, ?, ?)",
-            [(r["システム名"], r["別名"], r["担当者"], r["部署"], r["稼働の決まり"]) for r in rows],
-        )
+    if not rows:
+        return
     ten = [{"name": r["システム名"], "shurui": "システム"} for r in rows]
     ten += [{"name": r["担当者"], "shurui": "担当者"} for r in rows if r["担当者"]]
     sen = [{"moto": r["担当者"], "kankei": "担当する", "saki": r["システム名"]} for r in rows if r["担当者"]]
-    save_ten_sen(ten, sen)
+    with connect() as conn:  # 消す → 書く を 1 回の commit にまとめる（途中で失敗しても半端に消えない）
+        conn.execute("DELETE FROM daichou")
+        conn.execute("DELETE FROM sen WHERE kankei = '担当する'")
+        conn.execute("DELETE FROM ten WHERE shurui = '担当者'")
+        conn.executemany(
+            "INSERT OR IGNORE INTO daichou (system, betsumei, tantou, busho, kimari, renraku) VALUES (?, ?, ?, ?, ?, ?)",
+            [(r["システム名"], r["別名"], r["担当者"], r["部署"], r["稼働の決まり"], r.get("連絡先", "")) for r in rows],
+        )
+        _insert_ten_sen(conn, ten, sen)
+
+
+def _insert_ten_sen(conn: sqlite3.Connection, ten: list[dict], sen: list[dict]) -> None:
+    """開いている接続で、点と線を書く。すでにある点・線は飛ばす。"""
+    conn.executemany(
+        "INSERT OR IGNORE INTO ten (name, shurui) VALUES (?, ?)",
+        [(t["name"], t["shurui"]) for t in ten],
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO sen (moto, kankei, saki) VALUES (?, ?, ?)",
+        [(s["moto"], s["kankei"], s["saki"]) for s in sen],
+    )
 
 
 def save_ten_sen(ten: list[dict], sen: list[dict]) -> None:
     """点と線を書く。すでにある点・線は飛ばす。"""
     with connect() as conn:
-        conn.executemany(
-            "INSERT OR IGNORE INTO ten (name, shurui) VALUES (?, ?)",
-            [(t["name"], t["shurui"]) for t in ten],
-        )
-        conn.executemany(
-            "INSERT OR IGNORE INTO sen (moto, kankei, saki) VALUES (?, ?, ?)",
-            [(s["moto"], s["kankei"], s["saki"]) for s in sen],
-        )
+        _insert_ten_sen(conn, ten, sen)
 
 
 def reset() -> None:
@@ -108,16 +141,16 @@ def _rows(sql: str, params: tuple = ()) -> list[dict]:
 
 
 def all_kikaku() -> list[dict]:
-    return _rows("SELECT title, body FROM kikaku ORDER BY id")
+    return _rows("SELECT title, body, toushin, yokin, hoken, tsuki, target FROM kikaku ORDER BY id")
 
 
 def all_daichou() -> list[dict]:
-    return _rows("SELECT system, betsumei, tantou, busho, kimari FROM daichou ORDER BY id")
+    return _rows("SELECT system, betsumei, tantou, busho, kimari, renraku FROM daichou ORDER BY id")
 
 
 def daichou_of(system: str) -> dict:
     """そのシステムの台帳の行。台帳に載っていなければ空の辞書。"""
-    rows = _rows("SELECT system, betsumei, tantou, busho, kimari FROM daichou WHERE system = ?", (system,))
+    rows = _rows("SELECT system, betsumei, tantou, busho, kimari, renraku FROM daichou WHERE system = ?", (system,))
     return rows[0] if rows else {}
 
 
