@@ -30,6 +30,7 @@ ASHIKIRI = 0.01  # 似ている度合いがこれ以下の資料は出さない�
 # ── ボーナス点（ここだけ直せば配点を変えられる） ──────────────
 TEN_SHOUHIN_3 = 1.0    # 商品 3 つの組み合わせが完全一致
 TEN_SHOUHIN_2 = 0.5    # 商品 3 つのうち 2 つが一致
+TEN_SHOUHIN_1 = 0.1    # 商品 3 つのうち 1 つが一致
 TEN_TSUKI_ICCHI = 0.8  # 販売開始月が同じ
 TEN_TSUKI_ZURE1 = 0.7  # 販売開始月が 1 か月ずれ
 TEN_TARGET = 0.5       # ターゲットが同じ
@@ -116,6 +117,9 @@ def bonus(joken: dict | None, kikaku: dict) -> tuple[float, list[str]]:
     elif kazu == 2:
         ten += TEN_SHOUHIN_2
         riyuu.append(f"商品が2つ一致 +{TEN_SHOUHIN_2}")
+    elif kazu == 1:
+        ten += TEN_SHOUHIN_1
+        riyuu.append(f"商品が1つ一致 +{TEN_SHOUHIN_1}")
  
     # 販売開始月：何か月ずれているか（None は「どちらかに月が無い」。そのときは点を足さない）
     zure = tsuki_zure(joken, kikaku)
