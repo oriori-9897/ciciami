@@ -14,6 +14,7 @@
 import os
 
 from io import BytesIO
+from html import escape
 
 import anthropic
 import pandas as pd
@@ -84,9 +85,28 @@ def make_result_table(kekka: dict) -> pd.DataFrame:
             person_names.append(
                 system.get("tantou") or "未登録"
             )
-            contacts.append(
-                str(system.get("renraku") or "未登録")
-            )
+            contact = system.get("renraku")
+
+            if contact is None or str(contact).strip() == "":
+                contact_text = "未登録"
+            else:
+                contact_text = str(contact).strip()
+
+                # 数字だけの連絡先に付いた末尾の「.0」を除く。
+                # 先頭の0や、ハイフン付き電話番号は保持する。
+                integer_part, separator, decimal_part = (
+                    contact_text.partition(".")
+                )
+
+                if (
+                    separator
+                    and integer_part.isdigit()
+                    and decimal_part
+                    and set(decimal_part) == {"0"}
+                ):
+                    contact_text = integer_part
+
+            contacts.append(contact_text)
 
         yokin = item.get("yokin")
         if yokin == "定期預金":
@@ -539,7 +559,56 @@ if "kekka" in st.session_state:
     )
 
     # 改行と複数システムの対応を読みやすく表示する。
-    st.table(web_table)
+    # セル内の改行を、画面表示用の改行に変換する。
+    display_table = web_table.apply(
+        lambda column: column.map(
+            lambda value: escape(str(value)).replace("\n", "<br>")
+        )
+    )
+
+    table_html = display_table.to_html(
+        index=False,
+        escape=False,
+        border=0,
+        classes="search-result-table",
+    )
+
+    st.html(
+        """
+        <style>
+        .search-result-container {
+            overflow-x: auto;
+        }
+
+        .search-result-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .search-result-table th,
+        .search-result-table td {
+            padding: 10px 12px;
+            border: 1px solid rgba(128, 128, 128, 0.3);
+            text-align: left;
+            vertical-align: top;
+            line-height: 1.8;
+        }
+
+        .search-result-table th {
+            white-space: nowrap;
+        }
+
+        .search-result-table td:nth-child(7),
+        .search-result-table td:nth-child(8),
+        .search-result-table td:nth-child(9) {
+            white-space: nowrap;
+        }
+        </style>
+        """
+        + '<div class="search-result-container">'
+        + table_html
+        + "</div>",
+    )
 
     st.download_button(
         label=(
