@@ -6,8 +6,9 @@
 ⭐⭐ 濃い色は「ドラフトに名前が出てこなかった点」。線をたどったから見つかった物がどれかを見せる。
    色の決め方は表と同じ（graph.matomeru の kaite_aru）なので、表と絵で食い違わない。
    電話番号は担当者の付属情報なので薄い色にして、視線が担当者で止まるようにする。
-⭐ 電話番号は、graph.py がシステムの行に足す denwa（{担当者名: 電話番号} の辞書）から読む。
-   denwa が無い（graph.py がまだ足していない）か、その担当者の番号が空なら、電話番号の点は描かない。
+⭐ 電話番号は、graph.matomeru がシステムの行に載せる renraku（台帳の「代表連絡先」。1 システムに 1 つ）から読む。
+   担当者ごとの番号ではなく、そのシステムの代表番号を、そのシステムの担当者の右に付ける。
+   renraku が空（台帳に無い）なら、電話番号の点は描かない。同じ番号を持つ担当者が何人いても、点は 1 つに合流する。
 ⚠️ 法令は描かない（点の種類から外した）。kekka に hourei が残っていても読まない。
 """
 
@@ -58,7 +59,7 @@ def dot(kekka: dict) -> str:
     for g in kekka["system"]:
         iro = "kizon" if g["kaite_aru"] else "atarashii"
         lines.append(_ten(g["name"], iro, KATACHI["システム"]))
-        denwa = g.get("denwa") or {}  # graph.py が足す {担当者名: 電話番号}。まだ無ければ空
+        bangou = str(g.get("renraku") or "")  # そのシステムの代表連絡先。台帳に無ければ ""
         for tantou in filter(None, g["tantou"].split("・")):
             if tantou not in kaita:
                 kaita.add(tantou)
@@ -68,8 +69,7 @@ def dot(kekka: dict) -> str:
             #    システム → 担当者 の順に書き、dir=back で矢じりだけを逆（システム側）に付ける。
             lines.append(f'{_q(g["name"])} -> {_q(tantou)} [dir=back, label="担当する"];')
 
-            # 5 段目: 電話番号。番号が無い担当者には描かない（空の点を増やさない）。
-            bangou = denwa.get(tantou, "")
+            # 5 段目: 電話番号。番号が無ければ描かない（空の点を増やさない）。
             if not bangou:
                 continue
             if bangou not in kaita:
