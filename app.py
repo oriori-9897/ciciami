@@ -370,7 +370,7 @@ with col4:
         key="condition_tsuki",
     )
 
-with col5:
+with col5: #ターゲット層のタグ付けをjoukenから引用
     target = st.selectbox(
         "ターゲット層",
         options=[""] + [
