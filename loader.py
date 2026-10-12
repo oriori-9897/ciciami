@@ -29,17 +29,16 @@ DAICHOU_COLUMNS = {
     "担当者": "システム担当者",
     "部署": "システム管理部署",
     "稼働の決まり": None,  # Excel に無い → 空
-    "連絡先": "代表連絡先",  # 代表連絡先（電話番号）。database_v2.py が renraku 列と電話番号の点・線に使う
+    "連絡先": "代表連絡先",  # 電話番号にあたる列
 }
 
 # 🔧 別名の対応表（台帳のシステム名 → 企画書での呼び方）
-#    台帳 Excel に「別名」列が無いので、ここで補う。複数あるときは「、」でつなぐ。
-#    extract.py がこれを LLM に見せ、「CRM」と書かれていても台帳の名前にそろえる。
-#    ⚠️ 企画書が増えて、台帳と違う呼び方が出てきたら、ここに足す。
+#    台帳に別名の列が無いので、ここで補う。extract.py が LLM に見せ、台帳の名前にそろえる。
+#    ⚠️ 企画書が増えて、台帳と違う呼び方が出てきたら、ここへ足す。
 ALIASES = {
-    "顧客管理システム": "CRM、顧客情報管理システム",  # 冬のキャンペーン企画書の呼び方
-    "勘定系システム": "勘定系",  # 冬のキャンペーン企画書の呼び方
-    "投資信託管理システム": "投資信託販売管理システム",  # ⚠️ 要確認：預り資産販売システムの可能性もある
+    "顧客管理システム": "CRM、顧客情報管理システム",
+    "勘定系システム": "勘定系",
+    "投資信託管理システム": "投資信託販売管理システム",
 }
 
 
@@ -103,7 +102,7 @@ def load_kikaku() -> list[dict]:
 def load_daichou() -> list[dict]:
     """システム台帳の表（Excel）を読む。戻り値は 1 行 1 辞書のリスト。
 
-    ⭐ 返す列は システム名 / 別名 / 担当者 / 部署 / 稼働の決まり（database.py はこの名前で読む）。
+    ⭐ 返す列は システム名 / 別名 / 担当者 / 部署 / 稼働の決まり / 連絡先（database.py はこの名前で読む）。
        「誰がどのシステムの担当か」は表にそのまま書いてあるので、LLM に抜かせる必要が無い。
     """
     ws = load_workbook(DAICHOU_FILE, data_only=True).active  # 1 枚目のシート
@@ -114,13 +113,15 @@ def load_daichou() -> list[dict]:
         if excel_name is None or excel_name not in header:
             return ""
         value = row[header.index(excel_name)]
+        if isinstance(value, float) and value.is_integer():  # Excel の数値は 30001.0 の形で読めることがある → 30001 にする
+            value = int(value)
         return "" if value is None else str(value).strip()
 
     daichou = []
     for row in rows:
         record = {new: cell(row, old) for new, old in DAICHOU_COLUMNS.items()}
         if record["システム名"]:  # システム名が空の行（空白行）は飛ばす
-            if not record["別名"]:  # Excel に別名が無ければ、上の ALIASES で補う
+            if not record["別名"]:  # 台帳に別名が無ければ、上の ALIASES で補う
                 record["別名"] = ALIASES.get(record["システム名"], "")
             daichou.append(record)
     return daichou
