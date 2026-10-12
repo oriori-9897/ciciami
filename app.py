@@ -7,11 +7,13 @@
 ⭐ 流れは 2 本。
    しまう … 資料を読む → 点と線を抜く → DB にしまう（横の「資料を読み込む」。shimau.py）
    探す   … ドラフトを受け取る → 似た企画を探して線をたどる → 表で返す（まん中。graph.py）
-⭐⭐ 返すのは 2 つ。①過去の類似企画（原文）と、②企画 ― システム（法令）― 担当者のつながり。
+⭐⭐ 返すのは 2 つ。①過去の類似企画（原文）と、②企画 ― システム― 担当者のつながり。
    ②は表が主役で、絵は補助（折りたたみ）。次の行動は「各担当者と調整」なので、相手が一覧で読める形にする。
 """
 
 import os
+
+from io import BytesIO
 
 import anthropic
 import pandas as pd
@@ -30,6 +32,20 @@ st.set_page_config(page_title="獅子編み検索 ver2", page_icon="🦁", layou
 MARU = "①②③④⑤"          # 類似企画の番号。表の「使っていた類似企画」の列で、この番号を使う
 ATARASHII = "🟠 なし"  # ドラフトに書かれていなかった（＝線をたどったから見つかった）
 
+WEB_LIMIT = 3
+EXPORT_LIMIT = 20
+
+RESULT_COLUMNS = [
+    "企画書タイトル",
+    "投資信託",
+    "定期預金",
+    "保険",
+    "開始月",
+    "ターゲット層",
+    "システム",
+    "担当者",
+    "連絡先",
+]
 
 def api_error(e: Exception) -> str:
     """API の失敗を、次に何をすればよいかが分かる言葉にする。"""
@@ -44,6 +60,175 @@ def api_error(e: Exception) -> str:
     # キーが見つからない・モデルが断った、など。llm.py が言葉にして投げてくる。
     return str(e)
 
+def make_result_table(kekka: dict) -> pd.DataFrame:
+    """企画の順位を保ったまま、指定の9列の表を作る。"""
+    rows = []
+
+    for item in kekka["nita"]:
+        title = item["title"]
+
+        # この企画につながるシステムだけを取り出す。
+        systems = [
+            system
+            for system in kekka["system"]
+            if title in system["kikaku"]
+        ]
+
+        # 各列の同じ行が、同じシステムに対応する。
+        system_names = []
+        person_names = []
+        contacts = []
+
+        for system in systems:
+            system_names.append(system["name"])
+            person_names.append(
+                system.get("tantou") or "未登録"
+            )
+            contacts.append(
+                str(system.get("renraku") or "未登録")
+            )
+
+        yokin = item.get("yokin")
+        if yokin == "定期預金":
+            yokin_display = "あり"
+        else:
+            yokin_display = yokin or "不明"
+
+        rows.append({
+            "企画書タイトル": title,
+            "投資信託": item.get("toushin") or "不明",
+            "定期預金": yokin_display,
+            "保険": item.get("hoken") or "不明",
+            "開始月": (
+                jouken.tsuki_moji(item["tsuki"])
+                if item.get("tsuki") else "不明"
+            ),
+            "ターゲット層": item.get("target") or "不明",
+            "システム": (
+                "\n".join(system_names) if systems else "該当なし"
+            ),
+            "担当者": (
+                "\n".join(person_names) if systems else "該当なし"
+            ),
+            "連絡先": (
+                "\n".join(contacts) if systems else "該当なし"
+            ),
+        })
+
+    return pd.DataFrame(rows, columns=RESULT_COLUMNS)
+
+
+def make_result_excel(
+    result_df: pd.DataFrame,
+    search_info: dict,
+) -> bytes:
+    """指定の9列をExcelファイルに出力する。"""
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    condition_df = pd.DataFrame([
+        {
+            "項目": "検索方法",
+            "値": search_info["mode"],
+        },
+        {
+            "項目": "検索キーワード",
+            "値": search_info.get("keyword", ""),
+        },
+        {
+            "項目": "検索条件",
+            "値": jouken.moji(search_info["joken"]),
+        },
+        {
+            "項目": "出力件数",
+            "値": len(result_df),
+        },
+        {
+            "項目": "並び順",
+            "値": "検索スコアの高い順",
+        },
+        {
+            "項目": "連絡先",
+            "値": "システム台帳の代表連絡先",
+        },
+    ])
+
+    buffer = BytesIO()
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        result_df.to_excel(
+            writer,
+            sheet_name="検索結果",
+            index=False,
+        )
+        condition_df.to_excel(
+            writer,
+            sheet_name="検索条件",
+            index=False,
+        )
+
+        for sheet in writer.book.worksheets:
+            sheet.freeze_panes = "A2"
+
+            for cell in sheet[1]:
+                cell.font = Font(
+                    color="FFFFFF",
+                    bold=True,
+                )
+                cell.fill = PatternFill(
+                    fill_type="solid",
+                    fgColor="203864",
+                )
+
+            for row in sheet.iter_rows(min_row=2):
+                for cell in row:
+                    # 連絡先などを文字列として保存する。
+                    # 「=」で始まる文字も数式にしない。
+                    if isinstance(cell.value, str):
+                        cell.data_type = "s"
+
+                    cell.alignment = Alignment(
+                        vertical="top",
+                        wrap_text=True,
+                    )
+
+        sheet = writer.book["検索結果"]
+        sheet.auto_filter.ref = sheet.dimensions
+
+        widths = {
+            "A": 45,  # 企画書タイトル
+            "B": 16,  # 投資信託
+            "C": 14,  # 定期預金
+            "D": 16,  # 保険
+            "E": 12,  # 開始月
+            "F": 18,  # ターゲット層
+            "G": 35,  # システム
+            "H": 25,  # 担当者
+            "I": 28,  # 連絡先
+        }
+
+        for column, width in widths.items():
+            sheet.column_dimensions[column].width = width
+
+        for row in sheet.iter_rows(min_row=2):
+            line_count = max(
+                str(cell.value or "").count("\n") + 1
+                for cell in row
+            )
+            sheet.row_dimensions[row[0].row].height = min(
+                409,
+                max(45, line_count * 20),
+            )
+
+        condition_sheet = writer.book["検索条件"]
+        condition_sheet.column_dimensions["A"].width = 20
+        condition_sheet.column_dimensions["B"].width = 90
+
+        for row_number in range(
+            2, condition_sheet.max_row + 1
+        ):
+            condition_sheet.row_dimensions[row_number].height = 45
+
+    return buffer.getvalue()
 
 # ---------------------------------------------------------------- 合言葉
 # ⚠️ URL で公開すると、URL を知っている人は誰でもボタンを押せて、その分の API 料金がかかる。
@@ -73,11 +258,22 @@ with st.sidebar:
             st.error(api_error(e))
     if st.button("DB を空にする"):
         database.reset()
-        st.session_state.pop("kekka", None)
+
+        for key in (
+            "kekka",
+            "search_info",
+            "result_table",
+            "result_excel",
+        ):
+            st.session_state.pop(key, None)
+
         st.rerun()
 
     st.divider()
-    kensuu = st.slider("出す類似企画の件数", 1, len(MARU), 3)
+    st.caption(
+        f"画面：上位{WEB_LIMIT}企画 ／ "
+        f"Excel：上位{EXPORT_LIMIT}企画"
+    )
     with st.expander("システム台帳（表）を見る"):
         st.dataframe(
             pd.DataFrame(database.all_daichou()).rename(
@@ -235,157 +431,163 @@ elif has_conditions:
 can_search = has_draft or has_keyword or has_conditions
 
 # ---------------------------------------------------------- 検索実行
+# ---------------------------------------------------------- 検索実行
 if st.button("探す", type="primary", disabled=not can_search):
+    # 前回の結果を消し、今回の検索結果だけを保存する。
+    for key in (
+        "kekka",
+        "search_info",
+        "result_table",
+        "result_excel",
+    ):
+        st.session_state.pop(key, None)
+
     shiryou = database.all_kikaku()
 
     if not shiryou:
-        st.session_state.pop("kekka", None)
-        st.session_state.pop("search_info", None)
         st.warning(
             "検索対象の過去企画がDBにありません。"
-            "ドラフトのアップロードは不要ですが、"
-            "過去企画の登録は必要です。"
+            "過去企画の登録が必要です。"
         )
     else:
         with st.spinner("検索しています…"):
+            # Excel用に、まず上位20企画を検索する。
             if search_mode == "キーワード":
-                nita = ranking_v2.narabu_keyword(
+                export_results = ranking_v2.narabu_keyword(
                     keyword,
                     shiryou,
-                    kensuu,
+                    EXPORT_LIMIT,
                     joken,
                 )
                 search_text = keyword
 
             elif search_mode == "企画ドラフト":
-                nita = ranking_v2.narabu(
+                export_results = ranking_v2.narabu(
                     draft,
                     shiryou,
-                    kensuu,
+                    EXPORT_LIMIT,
                     joken,
                 )
                 search_text = draft
 
             else:
-                # 空の文章を渡すと、条件のボーナスだけで並べる。
-                nita = ranking_v2.narabu(
+                export_results = ranking_v2.narabu(
                     "",
                     shiryou,
-                    kensuu,
+                    EXPORT_LIMIT,
                     joken,
                 )
                 search_text = ""
 
-            michi = graph.tadoru([k["title"] for k in nita])
-
-            st.session_state["kekka"] = {
-                "nita": nita,
-                "michi": michi,
-                **graph.matomeru(search_text, michi),
-            }
-
-            st.session_state["search_info"] = {
+            search_info = {
                 "mode": search_mode,
                 "keyword": (
-                    keyword if search_mode == "キーワード" else ""
+                    keyword
+                    if search_mode == "キーワード"
+                    else ""
                 ),
                 "joken": joken.copy(),
             }
 
-if "kekka" in st.session_state:
-    kekka = st.session_state["kekka"]
-    search_info = st.session_state.get("search_info", {})
-
-    if search_info:
-        st.caption(
-            f"検索方法：{search_info['mode']} ／ "
-            f"検索時の条件：{jouken.moji(search_info['joken'])}"
-        )
-
-        if search_info.get("keyword"):
-            st.caption(
-                f"検索時のキーワード：{search_info['keyword']}"
+            # 上位20企画についてシステム・担当者・連絡先を取得。
+            export_kekka = graph.tadotte_matomeru(
+                export_results,
+                search_text,
             )
 
-    if not kekka["nita"]:
-        st.info(
-            "過去企画が見つかりませんでした。"
-            "キーワード・ドラフト・検索条件を変更してみてください。"
-        )
-        st.stop()
-    bangou = {k["title"]: MARU[i] for i, k in enumerate(kekka["nita"])}
+            result_table = make_result_table(export_kekka)
 
-    def kikaku_no(titles: list[str]) -> str:
-        """企画名のリストを、①の番号に置きかえる。例: ①②"""
-        return " ".join(bangou[t] for t in titles)
+            # 図と原文表示には上位3企画を使う。
+            web_results = export_results[:WEB_LIMIT]
+            web_kekka = graph.tadotte_matomeru(
+                web_results,
+                search_text,
+            )
 
-    # ---------------------------------------------------------- ① 類似企画
-    st.subheader("① 過去の類似企画")
+            st.session_state["kekka"] = web_kekka
+            st.session_state["search_info"] = search_info
+            st.session_state["result_table"] = result_table
+
+            if not result_table.empty:
+                st.session_state["result_excel"] = (
+                    make_result_excel(
+                        result_table,
+                        search_info,
+                    )
+                )
+
+
+# ---------------------------------------------------------- 結果表示
+if "kekka" in st.session_state:
+    kekka = st.session_state["kekka"]
+    search_info = st.session_state["search_info"]
+    result_table = st.session_state["result_table"]
+
     st.caption(
-        "文章またはキーワードの類似度と、条件の加点を合わせた順。"
-        "開くと原文が読めます。"
-)
-
-    for k in kekka["nita"]:
-        with st.expander(
-            f"{bangou[k['title']]} {k['title']}"
-            f"　（検索スコア {k['score']:.2f}）"
-        ):
-            st.markdown(k["body"])
-
-    # ---------------------------------------------------------- ② つながり（表）
-    st.subheader("② つながり — 次に相談する相手")
-    zenbu = kekka["system"] + kekka["hourei"]
-    hito = {t for g in kekka["system"] for t in g["tantou"].split("・") if t}
-    st.caption(
-        f"類似企画からたどって、システム {len(kekka['system'])} 件（担当者 {len(hito)} 人）と"
-        f"法令 {len(kekka['hourei'])} 件が見つかりました。"
-        f"このうち {sum(not g['kaite_aru'] for g in zenbu)} 件は、ドラフトに書かれていなかったものです（🟠）。"
+        f"検索方法：{search_info['mode']} ／ "
+        f"検索時の条件：{jouken.moji(search_info['joken'])}"
     )
 
-    st.markdown("**システムと担当者**　多くの類似企画が使っていた順")
-    if kekka["system"]:
-        st.table(
-            pd.DataFrame(
-                [
-                    {
-                        "システム": g["name"],
-                        "担当者": g["tantou"] or "（台帳に無い）",
-                        "部署": g["busho"],
-                        "稼働の決まり（台帳より）": g["kimari"],
-                        "使っていた類似企画": kikaku_no(g["kikaku"]),
-                        "検索入力に記載": "あり" if g["kaite_aru"] else ATARASHII,
-                    }
-                    for g in kekka["system"]
-                ]
-            ).set_index("システム")
-        )
-    else:
-        st.write("類似企画からつながるシステムはありませんでした。")
-
-    st.markdown("**確かめる法令**　多くの類似企画が関わっていた順")
-    if kekka["hourei"]:
-        st.table(
-            pd.DataFrame(
-                [
-                    {
-                        "法令": g["name"],
-                        "関わっていた類似企画": kikaku_no(g["kikaku"]),
-                        "検索入力に記載": "あり" if g["kaite_aru"] else ATARASHII,
-                    }
-                    for g in kekka["hourei"]
-                ]
-            ).set_index("法令")
-        )
-    else:
-        st.write("類似企画からつながる法令はありませんでした。")
-
-    # ---------------------------------------------------------- 絵（補助）
-    with st.expander("つながりを絵で見る"):
+    if search_info.get("keyword"):
         st.caption(
-            "上の表と同じ中身を、丸と矢印にしたものです。"
-            "🟧 濃い色 = 検索入力に書かれていなかった点（たどって見つかった）／"
-            "⬜ 薄い色 = 検索入力にすでに書かれていた点。"
-            "形は 四角 = 法令、円筒 = システム、だ円 = 担当者。"
+            f"検索時のキーワード：{search_info['keyword']}"
         )
-        st.graphviz_chart(zu.dot(kekka), use_container_width=True)
+
+    if result_table.empty:
+        st.info(
+            "過去企画が見つかりませんでした。"
+            "キーワード・ドラフト・検索条件を変更してください。"
+        )
+        st.stop()
+
+    st.subheader("検索結果")
+
+    web_table = result_table.head(WEB_LIMIT)
+
+    st.caption(
+        f"関連性の高い順に上位{len(web_table)}企画を表示しています。"
+        "連絡先はシステム台帳の代表連絡先です。"
+    )
+
+    # 改行と複数システムの対応を読みやすく表示する。
+    st.table(web_table)
+
+    st.download_button(
+        label=(
+            "検索結果をExcelでダウンロード"
+            f"（{len(result_table)}企画）"
+        ),
+        data=st.session_state["result_excel"],
+        file_name="検索結果_上位20企画.xlsx",
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        key="download_result_excel",
+    )
+
+    st.caption(
+        "Excelも同じ関連性の順で、最大20企画を出力します。"
+        "システム・担当者・連絡先の各セルは、"
+        "同じ行が同じシステムに対応します。"
+    )
+
+    # 原文は必要な場合に開けるようにする。
+    st.subheader("企画書の原文")
+
+    for rank, item in enumerate(kekka["nita"], start=1):
+        with st.expander(
+            f"{rank}. {item['title']}"
+        ):
+            st.markdown(item["body"])
+
+    # 上位3企画に関するつながりを表示する。
+    with st.expander("つながりを図で見る"):
+        st.caption(
+            "画面に表示した上位3企画の"
+            "システム・担当者とのつながりです。"
+        )
+        st.graphviz_chart(
+            zu.dot(kekka),
+            use_container_width=True,
+        )
