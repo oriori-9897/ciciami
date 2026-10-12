@@ -371,23 +371,12 @@ with col4:
     )
 
 with col5:
-    # 選択肢の値はjouken.pyから取得する。
-    # 年齢の説明だけ、画面表示用に付け加える。
-    target_age_labels = {
-        "若年層": "若年層（18–30歳）",
-        "現役層": "現役層（31–55歳）",
-        "高齢層": "高齢層（55歳以降）",
-    }
-
     target = st.selectbox(
         "ターゲット層",
         options=[""] + [
             value for value in jouken.TARGET if value != "なし"
         ],
-        format_func=lambda value: (
-            target_age_labels.get(value, value)
-            if value else "指定なし"
-        ),
+        format_func=lambda value: value or "指定なし",
         key="condition_target",
     )
 
