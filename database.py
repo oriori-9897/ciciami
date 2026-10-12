@@ -3,7 +3,7 @@
 ⭐ 図の「しまう」の 3 番目の係と、まん中の「DB」。表は 4 つ。
    kikaku  … 過去の企画書の本文（似た企画を探すのに使う。原文もここから出す）と、商品名など（toushin / yokin / hoken / tsuki / target）
    daichou … システム台帳の表（CSV をそのまま。1 行が 1 システム）
-   ten     … 点。登場する物の名前（企画・法令・システム・担当者）
+   ten     … 点。登場する物の名前（企画・法令・システム・担当者・電話番号）
    sen     … 線。点どうしの関係（moto --kankei--> saki）
 ⭐⭐ どの表にも UNIQUE を付け、INSERT OR IGNORE で書く。
    「資料を読み込む」を 2 回押しても、同じ行が 2 つにならない（＝重ならないように書く）。
@@ -36,12 +36,12 @@ CREATE TABLE IF NOT EXISTS daichou (
 CREATE TABLE IF NOT EXISTS ten (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     name   TEXT NOT NULL UNIQUE,   -- 例: 景品表示法
-    shurui TEXT NOT NULL           -- 企画 / 法令 / システム / 担当者
+    shurui TEXT NOT NULL           -- 企画 / 法令 / システム / 担当者 / 電話番号
 );
 CREATE TABLE IF NOT EXISTS sen (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     moto   TEXT NOT NULL,   -- 線の出どころ（ten.name）
-    kankei TEXT NOT NULL,   -- 関わる / 使う / 担当する
+    kankei TEXT NOT NULL,   -- 関わる / 使う / 担当する / 連絡先
     saki   TEXT NOT NULL,   -- 線の行き先（ten.name）
     UNIQUE (moto, kankei, saki)
 );
@@ -84,12 +84,13 @@ def save_kikaku(kikaku: list[dict]) -> None:
 
 
 def save_daichou(rows: list[dict]) -> None:
-    """台帳の表を書く。あわせて、表から読める点と線（担当者 --担当する--> システム）も書く。
+    """台帳の表を書く。あわせて、表から読める点と線（担当者 --担当する--> システム、システム --連絡先--> 電話番号）も書く。
 
     ⭐ CSV の日本語の列名を、表の列に当てはめる。
     ⭐⭐ 担当者とシステムの線は、表の 1 行がそのまま 1 本の線になる。LLM は通さない。
     ⭐⭐⭐ 台帳が「正」なので、書く前に台帳から作った分（台帳の表・担当者の点・「担当する」の線）を消して作り直す。
        担当者が変わっても、古い担当者が残らない。
+       消すもの: 台帳の表、担当者・電話番号の点、「担当する」「連絡先」の線。
        消さないもの: 企画書の本文、法令・システムの点、企画書から作った線（関わる / 使う）。
        ⚠️ 台帳が空のときは何もしない。読み込みに失敗して、担当者が全部消えるのを防ぐため。
     """
@@ -98,10 +99,13 @@ def save_daichou(rows: list[dict]) -> None:
     ten = [{"name": r["システム名"], "shurui": "システム"} for r in rows]
     ten += [{"name": r["担当者"], "shurui": "担当者"} for r in rows if r["担当者"]]
     sen = [{"moto": r["担当者"], "kankei": "担当する", "saki": r["システム名"]} for r in rows if r["担当者"]]
+    # 電話番号（代表連絡先）：番号を点にして、システム --連絡先--> 電話番号 の線を引く。同じ番号は 1 つの点にまとまる。
+    ten += [{"name": r["連絡先"], "shurui": "電話番号"} for r in rows if r.get("連絡先")]
+    sen += [{"moto": r["システム名"], "kankei": "連絡先", "saki": r["連絡先"]} for r in rows if r.get("連絡先")]
     with connect() as conn:  # 消す → 書く を 1 回の commit にまとめる（途中で失敗しても半端に消えない）
         conn.execute("DELETE FROM daichou")
-        conn.execute("DELETE FROM sen WHERE kankei = '担当する'")
-        conn.execute("DELETE FROM ten WHERE shurui = '担当者'")
+        conn.execute("DELETE FROM sen WHERE kankei IN ('担当する', '連絡先')")
+        conn.execute("DELETE FROM ten WHERE shurui IN ('担当者', '電話番号')")
         conn.executemany(
             "INSERT OR IGNORE INTO daichou (system, betsumei, tantou, busho, kimari, renraku) VALUES (?, ?, ?, ?, ?, ?)",
             [(r["システム名"], r["別名"], r["担当者"], r["部署"], r["稼働の決まり"], r.get("連絡先", "")) for r in rows],
